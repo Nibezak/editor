@@ -1,4 +1,9 @@
+import { usePascalI18n } from '@pascal-app/core'
 import type { ToolHint } from '@pascal-app/core'
+import type { ContinuationContext } from '../../../lib/continuation'
+import type { HudTitle } from '../../../lib/hud-title'
+import type { SnapContext } from '../../../lib/snapping-mode'
+import { useVisibleToolHints } from '../../../lib/panel-tool-options'
 import { ContextualHelperPanel } from './contextual-helper-panel'
 
 /**
@@ -13,19 +18,42 @@ import { ContextualHelperPanel } from './contextual-helper-panel'
 export function RegisteredToolHelper({
   hints,
   shiftPressed = false,
+  snapContext = null,
+  continuationContext = null,
+  title = null,
+  notice = null,
 }: {
   hints: ToolHint[]
   shiftPressed?: boolean
+  snapContext?: SnapContext | null
+  continuationContext?: ContinuationContext | null
+  title?: HudTitle | null
+  notice?: string | null
 }) {
-  if (hints.length === 0) return null
+  const i18n = usePascalI18n()
+  const visible = useVisibleToolHints(hints)
+  if (visible.length === 0 && !snapContext && !continuationContext && !notice) return null
+  // Hints carrying a live-state `chip` render as mode chips next to the
+  // snapping / continuation rows; the rest stay static key rows.
+  const chipHints = visible.filter((hint) => hint.chip)
+  const staticHints = visible.filter((hint) => !hint.chip)
   return (
     <ContextualHelperPanel
-      hints={hints.map((hint) => ({
-        keys: [hint.key],
-        label:
-          shiftPressed && hint.key === 'Shift' ? 'Guided constraints bypassed' : hint.label,
-        active: shiftPressed && hint.key === 'Shift',
-      }))}
+      chipHints={chipHints}
+      hints={staticHints.map((hint) => {
+        // Shift is a per-kind bypass for opening / zone / duct placement ("Free
+        // place", "Free angle", …) — those flip to a bypassed state while held.
+        const isBypassHint = hint.key === 'Shift'
+        return {
+          keys: [hint.key],
+          label: shiftPressed && isBypassHint ? i18n._({ id: 'editor.helpers.registeredToolHelper.guidedConstraintsBypassed', message: 'Guided constraints bypassed' }) : hint.label,
+          active: shiftPressed && isBypassHint,
+        }
+      })}
+      continuationContext={continuationContext}
+      notice={notice}
+      snapContext={snapContext}
+      title={title}
     />
   )
 }

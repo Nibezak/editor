@@ -12,8 +12,12 @@ import {
 } from '@pascal-app/core'
 import {
   consumePlacementDragRelease,
+  copyCollectionIds,
   DragBoundingBox,
   EDITOR_LAYER,
+  isAlignmentGuideActive,
+  isGridSnapActive,
+  isMagneticSnapActive,
   markToolCancelConsumed,
   stripPlacementMetadataFlags,
   triggerSFX,
@@ -192,18 +196,17 @@ export const MoveDuctFittingTool: React.FC<{ node: AnyNode }> = ({ node }) => {
     let lastDetached = false
 
     const onMove = (event: GridEvent) => {
-      const bypass = event.nativeEvent?.shiftKey === true
       // Alt = detach: drop the connected-duct follow so the fitting moves on
       // its own, leaving every mated run where it sits.
       const detached = event.nativeEvent?.altKey === true
-      const snap = bypass ? (v: number) => v : snapToGridStep
-
+      const snap = isGridSnapActive() ? snapToGridStep : (v: number) => v
       let x = snap(event.localPosition[0])
       let z = snap(event.localPosition[2])
 
-      // Alignment: snap the footprint box edges onto nearby geometry and
-      // publish guides (Alt / Shift bypass).
-      if (!bypass) {
+      // Magnetic alignment: snap the footprint box edges onto nearby geometry
+      // and publish guides. Grid follows the snapping mode; lines follow
+      // magnetic alignment — the two are independent.
+      if (isAlignmentGuideActive()) {
         const proposed: Aabb2D = {
           minX: x + ox - hx,
           maxX: x + ox + hx,
@@ -211,25 +214,30 @@ export const MoveDuctFittingTool: React.FC<{ node: AnyNode }> = ({ node }) => {
           maxZ: z + oz + hz,
         }
         const { dx, dz, guides } = resolveGhostAlignment(nodeId, proposed, candidates)
-        x += dx
-        z += dz
+        if (isMagneticSnapActive()) {
+          x += dx
+          z += dz
+        }
         useAlignmentGuides.getState().set(guides)
       } else {
         useAlignmentGuides.getState().clear()
       }
       const next: Vec3 = [x, lastPos[1], z]
 
-      if (next[0] !== lastPos[0] || next[1] !== lastPos[1] || next[2] !== lastPos[2]) {
+      if (
+        (isGridSnapActive() || isMagneticSnapActive()) &&
+        (next[0] !== lastPos[0] || next[2] !== lastPos[2])
+      )
         triggerSFX('sfx:grid-snap')
-      }
+      // Detached: keep the followers at their origin (drop any live overrides
+      // from a prior non-detached frame). Otherwise preview the follow; joints
+      // that cannot follow hold the last shown frame.
+      if (detached) connectivity?.clear()
+      else if (connectivity && !connectivity.preview({ position: next })) return
       lastPos = next
       lastDetached = detached
       hasMoved = true
       setCursorPos(next)
-      // Detached: keep the followers at their origin (drop any live overrides
-      // from a prior non-detached frame). Otherwise preview the follow.
-      if (detached) connectivity?.clear()
-      else connectivity?.preview({ position: next })
     }
 
     const commit = (event: GridEvent, fromDragRelease = false) => {
@@ -245,26 +253,38 @@ export const MoveDuctFittingTool: React.FC<{ node: AnyNode }> = ({ node }) => {
         event.nativeEvent?.stopPropagation?.()
         return
       }
+      const creating = isNew && !useScene.getState().nodes[nodeId]
+      // Fold connected-duct / sibling-run follow-updates into the SAME batch
+      // as the moved fitting so the whole joint is one undo step. Detached
+      // (Alt on the final frame): the joint is broken, so nothing follows.
+      const followUpdates =
+        creating || lastDetached || !connectivity
+          ? []
+          : connectivity.commitUpdates({ position: lastPos })
+      if (!followUpdates) {
+        event.nativeEvent?.stopPropagation?.()
+        return
+      }
       committed = true
 
       useScene.temporal.getState().resume()
       let selectId = nodeId
-      if (isNew && !useScene.getState().nodes[nodeId]) {
+      if (creating) {
         const created = DuctFittingNode.parse({
           ...(node as Record<string, unknown>),
           position: lastPos,
           metadata: stripPlacementMetadataFlags(node.metadata),
           visible: true,
         })
-        useScene.getState().createNode(created as AnyNode, node.parentId as AnyNodeId)
+        useScene.getState().createNodes([
+          {
+            node: created as AnyNode,
+            parentId: node.parentId as AnyNodeId,
+            collectionIds: copyCollectionIds(node),
+          },
+        ])
         selectId = created.id as AnyNodeId
       } else {
-        // Fold connected-duct / sibling-run follow-updates into the SAME batch
-        // as the moved fitting so the whole joint is one undo step. Detached
-        // (Alt on the final frame): the joint is broken, so nothing follows.
-        const followUpdates = lastDetached
-          ? []
-          : (connectivity?.commitUpdates({ position: lastPos }) ?? [])
         const scene = useScene.getState()
         scene.updateNodes([
           { id: nodeId, data: { position: lastPos } as Partial<AnyNode> },

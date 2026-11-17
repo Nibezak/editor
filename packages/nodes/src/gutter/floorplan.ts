@@ -7,6 +7,7 @@ import type {
   RoofNode,
   RoofSegmentNode,
 } from '@pascal-app/core'
+import { getRoofShapeEaveOverhang } from '@pascal-app/core'
 import { computeGutterMitres, type GutterWithSegment } from './corner-mitre'
 import { EAVE_TUCK_INWARD } from './eave-snap'
 import { outletDims, outletShapeForProfile, profileFloorMidZ } from './profile-geometry'
@@ -31,10 +32,10 @@ export function buildGutterFloorplan(
   ctx: GeometryContext,
 ): FloorplanGeometry | null {
   const segment = ctx.parent as RoofSegmentNode | null
-  if (!segment || segment.type !== 'roof-segment') return null
+  if (segment?.type !== 'roof-segment') return null
   const roofId = segment.parentId as AnyNodeId | null
   const roof = roofId ? (ctx.resolve(roofId) as RoofNode | undefined) : undefined
-  if (!roof || roof.type !== 'roof') return null
+  if (roof?.type !== 'roof') return null
 
   // Compose roof → segment → gutter in plan coords. Each rotation is
   // negated so SVG's y-down CW matches Three.js' top-down CCW — the same
@@ -75,7 +76,7 @@ export function buildGutterFloorplan(
   // the net move at a corner is then identical for both gutters, so they
   // still meet — now at the structural corner. Exact for right-angle
   // (hip / rectangular) corners.
-  const eaveInset = Math.max(0, (segment.overhang ?? 0) - EAVE_TUCK_INWARD)
+  const eaveInset = Math.max(0, getRoofShapeEaveOverhang(segment) - EAVE_TUCK_INWARD)
   const backZ = -eaveInset
   const rimZ = width - eaveInset
 
@@ -111,7 +112,7 @@ export function buildGutterFloorplan(
   const mitreSiblings: GutterWithSegment[] = []
   for (const segId of roof.children ?? []) {
     const sib = ctx.resolve(segId as AnyNodeId) as RoofSegmentNode | undefined
-    if (!sib || sib.type !== 'roof-segment') continue
+    if (sib?.type !== 'roof-segment') continue
     for (const gid of sib.children ?? []) {
       const g = ctx.resolve(gid as AnyNodeId) as GutterNode | undefined
       if (g && g.type === 'gutter' && g.id !== node.id) {

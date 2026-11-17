@@ -1,12 +1,19 @@
 import {
+  type FenceWithFeatures,
   type FloorplanGeometry,
+  fenceWithFeatures,
   type GeometryContext,
-  getWallCurveFrameAt,
-  getWallCurveLength,
+  getFenceCenterlineFrameAt,
+  getFenceCenterlineLength,
+  getFenceControlHandle,
+  getFenceSpanMode,
   getWallMidpointHandlePoint,
   isCurvedWall,
-  sampleWallCenterline,
+  isSplineFence,
+  resolveFenceFeatures,
+  sampleFenceCenterline,
 } from '@pascal-app/core'
+import { buildFenceFeatureSymbol } from '../fence-feature/floorplan'
 import type { FenceNode } from './schema'
 
 /**
@@ -32,14 +39,22 @@ import type { FenceNode } from './schema'
  * in the legacy panel and is fence-specific, so it lives with the kind.
  */
 
+// The tangent handle arm is drawn this many times longer than the raw curve
+// handle vector so it's easy to grab on screen even at the default (small)
+// tangent. The `move-tangent` affordance divides this factor back out so the
+// stored tangent matches the visual arm length. Must stay in sync with the
+// 3D tool's arm scale.
+const TANGENT_HANDLE_ARM_SCALE = 3
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
 }
 
 function getFloorplanFenceLength(fence: FenceNode): number {
-  return isCurvedWall(fence)
-    ? getWallCurveLength(fence)
-    : Math.hypot(fence.end[0] - fence.start[0], fence.end[1] - fence.start[1])
+  if (isSplineFence(fence) || isCurvedWall(fence)) {
+    return getFenceCenterlineLength(fence)
+  }
+  return Math.hypot(fence.end[0] - fence.start[0], fence.end[1] - fence.start[1])
 }
 
 /**
@@ -88,6 +103,37 @@ function buildMarker(
   isActive: boolean,
 ): FloorplanGeometry {
   const markerStrokeWidth = isActive ? 1.65 : 1.35
+
+  if (fence.style === 'picket') {
+    const w = clamp(fence.postSize * 0.55, 0.035, 0.065)
+    const h = clamp(fence.baseHeight * 0.55, 0.08, 0.14)
+    return {
+      kind: 'group',
+      transform: { translate: [point.x, point.y], rotate: angleRadians },
+      children: [
+        {
+          kind: 'rect',
+          x: -(w + 0.026) / 2,
+          y: -(h + 0.026) / 2,
+          width: w + 0.026,
+          height: h + 0.026,
+          rx: 0.012,
+          ry: 0.012,
+          fill: surfaceColor,
+        },
+        {
+          kind: 'rect',
+          x: -w / 2,
+          y: -h / 2,
+          width: w,
+          height: h,
+          rx: 0.008,
+          ry: 0.008,
+          fill: accentColor,
+        },
+      ],
+    }
+  }
 
   if (fence.style === 'privacy' || fence.style === 'horizontal') {
     const w = clamp(fence.postSize * 0.58, 0.038, 0.068)
@@ -208,7 +254,12 @@ function buildMarker(
   }
 }
 
-export function buildFenceFloorplan(node: FenceNode, ctx: GeometryContext): FloorplanGeometry {
+export function buildFenceFloorplan(
+  node: FenceWithFeatures,
+  ctx: GeometryContext,
+): FloorplanGeometry {
+  const drafts = node.features ?? []
+  node = fenceWithFeatures(node, ctx.children)
   const view = ctx.viewState
   const palette = view?.palette
   const isSelected = view?.selected ?? false
@@ -217,15 +268,37 @@ export function buildFenceFloorplan(node: FenceNode, ctx: GeometryContext): Floo
   const isActive = isSelected || isHighlighted
   const showInteractiveChrome = isActive || isHovered
 
-  // Centerline path — sampled for curved fences so the underlay /
+  // Centerline path — sampled for spline / arc fences so the underlay /
   // accent / glow all trace the same shape.
-  const centerlinePoints = isCurvedWall(node)
-    ? sampleWallCenterline(node, 24)
-    : [
-        { x: node.start[0], y: node.start[1] },
-        { x: node.end[0], y: node.end[1] },
-      ]
-  const pathD = buildCenterlinePathD(centerlinePoints)
+  const centerlinePoints =
+    isSplineFence(node) || isCurvedWall(node)
+      ? sampleFenceCenterline(node, 24)
+      : [
+          { x: node.start[0], y: node.start[1] },
+          { x: node.end[0], y: node.end[1] },
+        ]
+  const features = resolveFenceFeatures(node)
+  const visibleRanges: Array<[number, number]> = []
+  let rangeStart = 0
+  for (const feature of features) {
+    if (feature.startT > rangeStart) visibleRanges.push([rangeStart, feature.startT])
+    rangeStart = feature.endT
+  }
+  if (rangeStart < 1) visibleRanges.push([rangeStart, 1])
+  const strokePaths =
+    features.length === 0
+      ? [centerlinePoints]
+      : visibleRanges.map(([start, end]) => {
+          const count = Math.max(
+            2,
+            Math.ceil(((end - start) * getFenceCenterlineLength(node)) / 0.2) + 1,
+          )
+          return Array.from(
+            { length: count },
+            (_, index) =>
+              getFenceCenterlineFrameAt(node, start + ((end - start) * index) / (count - 1)).point,
+          )
+        })
 
   // Stroke shifts: selected wins; hover (not selected) → `wallHoverStroke`
   // (light blue from the legacy palette, same as walls); otherwise dark
@@ -257,9 +330,11 @@ export function buildFenceFloorplan(node: FenceNode, ctx: GeometryContext): Floo
 
   // Marker frames. Filter to first+last when infill is off so the user
   // still sees end posts (matches legacy).
-  const markerTs = getFloorplanFenceMarkerTs(node)
+  const markerTs = getFloorplanFenceMarkerTs(node).filter(
+    (t) => !features.some((feature) => t > feature.startT && t < feature.endT),
+  )
   const markerFrames = markerTs.map((t) => {
-    const frame = getWallCurveFrameAt(node, t)
+    const frame = getFenceCenterlineFrameAt(node, t)
     return {
       point: frame.point,
       angle: Math.atan2(frame.tangent.y, frame.tangent.x),
@@ -276,43 +351,46 @@ export function buildFenceFloorplan(node: FenceNode, ctx: GeometryContext): Floo
   // low-opacity ring. Width steps with the interaction level so hover
   // is subtler than active.
   if (glowOpacity > 0) {
+    for (const points of strokePaths)
+      children.push({
+        kind: 'path',
+        d: buildCenterlinePathD(points),
+        fill: 'none',
+        stroke: glowStroke,
+        strokeWidth: isActive ? 9.5 : isHovered ? 8.8 : 8.2,
+        strokeOpacity: glowOpacity,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round',
+        vectorEffect: 'non-scaling-stroke',
+      })
+  }
+
+  // 2. White underlay — visible fence body base layer.
+  for (const points of strokePaths)
     children.push({
       kind: 'path',
-      d: pathD,
+      d: buildCenterlinePathD(points),
       fill: 'none',
-      stroke: glowStroke,
-      strokeWidth: isActive ? 9.5 : isHovered ? 8.8 : 8.2,
-      strokeOpacity: glowOpacity,
+      stroke: underlayStroke,
+      strokeOpacity: 0.98,
+      strokeWidth: underlayWidth,
       strokeLinecap: 'round',
       strokeLinejoin: 'round',
       vectorEffect: 'non-scaling-stroke',
     })
-  }
-
-  // 2. White underlay — visible fence body base layer.
-  children.push({
-    kind: 'path',
-    d: pathD,
-    fill: 'none',
-    stroke: underlayStroke,
-    strokeOpacity: 0.98,
-    strokeWidth: underlayWidth,
-    strokeLinecap: 'round',
-    strokeLinejoin: 'round',
-    vectorEffect: 'non-scaling-stroke',
-  })
 
   // 3. Dark accent on top.
-  children.push({
-    kind: 'path',
-    d: pathD,
-    fill: 'none',
-    stroke: accentStroke,
-    strokeWidth: accentWidth,
-    strokeLinecap: 'round',
-    strokeLinejoin: 'round',
-    vectorEffect: 'non-scaling-stroke',
-  })
+  for (const points of strokePaths)
+    children.push({
+      kind: 'path',
+      d: buildCenterlinePathD(points),
+      fill: 'none',
+      stroke: accentStroke,
+      strokeWidth: accentWidth,
+      strokeLinecap: 'round',
+      strokeLinejoin: 'round',
+      vectorEffect: 'non-scaling-stroke',
+    })
 
   // 4. Style-aware markers. Pass `showInteractiveChrome` so hover also
   // bumps marker stroke widths slightly (legacy panel does the same).
@@ -328,37 +406,137 @@ export function buildFenceFloorplan(node: FenceNode, ctx: GeometryContext): Floo
       ),
     )
   }
-
-  // 5. Hit-line for click detection.
-  children.push({
-    kind: 'hit-line',
-    x1: node.start[0],
-    y1: node.start[1],
-    x2: node.end[0],
-    y2: node.end[1],
-    strokeWidthPx: 18,
-    cursor: 'pointer',
-  })
+  // 5. Hit-line(s) for click detection. A straight/arc fence uses a single
+  // chord-spanning line; a spline fence emits one short hit-line per sampled
+  // span so the clickable region follows the curve instead of cutting the
+  // chord (there's no curved `hit-path` primitive yet).
+  if (isSplineFence(node) || features.length > 0) {
+    for (const points of strokePaths)
+      for (let i = 1; i < points.length; i += 1) {
+        const a = points[i - 1]!
+        const b = points[i]!
+        children.push({
+          kind: 'hit-line',
+          x1: a.x,
+          y1: a.y,
+          x2: b.x,
+          y2: b.y,
+          strokeWidthPx: 18,
+          cursor: 'pointer',
+        })
+      }
+  } else {
+    children.push({
+      kind: 'hit-line',
+      x1: node.start[0],
+      y1: node.start[1],
+      x2: node.end[0],
+      y2: node.end[1],
+      strokeWidthPx: 18,
+      cursor: 'pointer',
+    })
+  }
 
   // 6. Endpoint handles + side move-arrows + curve handle + length when
   //    selected. Mirrors the wall builder so fences gain the same set of
   //    in-plan affordances (drag endpoints, drag body via either side
   //    arrow, drag the midpoint sagitta to curve).
   if (isSelected) {
-    children.push({
-      kind: 'endpoint-handle',
-      point: [node.start[0], node.start[1]],
-      state: 'idle',
-      affordance: 'move-endpoint',
-      payload: { fenceId: node.id, endpoint: 'start' as const },
-    })
-    children.push({
-      kind: 'endpoint-handle',
-      point: [node.end[0], node.end[1]],
-      state: 'idle',
-      affordance: 'move-endpoint',
-      payload: { fenceId: node.id, endpoint: 'end' as const },
-    })
+    if (isSplineFence(node) && node.path) {
+      // Spline fence: per control point draw (a) the symmetric tangent line
+      // through the point with a small handle dot on each end — dragging an
+      // end bends the curve on both sides via `move-tangent` — and (b) the
+      // larger control-point dot itself, which moves the point.
+      for (let i = 0; i < node.path.length; i += 1) {
+        const point = node.path[i]!
+        const handle = getFenceControlHandle(node.path, node.tangents, i)
+        // Scale the on-screen handle arm so even the default (small) tangent
+        // is grabbable; the affordance divides this back out on apply.
+        const armX = handle.x * TANGENT_HANDLE_ARM_SCALE
+        const armY = handle.y * TANGENT_HANDLE_ARM_SCALE
+        const out: [number, number] = [point[0] + armX, point[1] + armY]
+        const inn: [number, number] = [point[0] - armX, point[1] - armY]
+        const showOut =
+          i < node.path.length - 1 &&
+          getFenceSpanMode(node.path, node.tangents, node.spanModes, i) === 'curve'
+        const showIn =
+          i > 0 && getFenceSpanMode(node.path, node.tangents, node.spanModes, i - 1) === 'curve'
+
+        // Connecting line (the "tangent" through the point). Violet to match
+        // the 3D tangent line + the handle dots.
+        if (showOut || showIn)
+          children.push({
+            kind: 'line',
+            x1: showIn ? inn[0] : point[0],
+            y1: showIn ? inn[1] : point[1],
+            x2: showOut ? out[0] : point[0],
+            y2: showOut ? out[1] : point[1],
+            stroke: '#8381ed',
+            strokeWidth: 1.25,
+            strokeOpacity: 0.85,
+            vectorEffect: 'non-scaling-stroke',
+          })
+        // Handle dot on each end. Both drive the same `move-tangent`
+        // affordance; `side` tells it which end is being dragged so the
+        // stored OUT vector gets the correct sign.
+        if (showOut)
+          children.push({
+            kind: 'endpoint-handle',
+            point: out,
+            state: 'idle',
+            variant: 'curve',
+            affordance: 'move-tangent',
+            payload: { fenceId: node.id, index: i, side: 'out' as const },
+          })
+        if (showIn)
+          children.push({
+            kind: 'endpoint-handle',
+            point: inn,
+            state: 'idle',
+            variant: 'curve',
+            affordance: 'move-tangent',
+            payload: { fenceId: node.id, index: i, side: 'in' as const },
+          })
+        // The control-point dot last so it sits on top of the tangent line.
+        children.push({
+          kind: 'endpoint-handle',
+          point: [point[0], point[1]],
+          state: 'idle',
+          affordance: 'move-control-point',
+          payload: { fenceId: node.id, index: i },
+        })
+      }
+    } else {
+      children.push({
+        kind: 'endpoint-handle',
+        point: [node.start[0], node.start[1]],
+        state: 'idle',
+        affordance: 'move-endpoint',
+        payload: { fenceId: node.id, endpoint: 'start' as const },
+      })
+      children.push({
+        kind: 'endpoint-handle',
+        point: [node.end[0], node.end[1]],
+        state: 'idle',
+        affordance: 'move-endpoint',
+        payload: { fenceId: node.id, endpoint: 'end' as const },
+      })
+    }
+
+    const thicknessFrame = getFenceCenterlineFrameAt(node, 0.5)
+    const halfThickness = (node.thickness ?? 0.08) / 2
+    for (const side of [1, -1] as const) {
+      children.push({
+        kind: 'endpoint-handle',
+        point: [
+          thicknessFrame.point.x + thicknessFrame.normal.x * halfThickness * side,
+          thicknessFrame.point.y + thicknessFrame.normal.y * halfThickness * side,
+        ],
+        state: 'idle',
+        affordance: 'thickness',
+        payload: { fenceId: node.id, side },
+      })
+    }
 
     // Two perpendicular `move-arrow` chevrons at the fence midpoint.
     // No `affordance` → the registry layer routes pointer-down through
@@ -371,7 +549,8 @@ export function buildFenceFloorplan(node: FenceNode, ctx: GeometryContext): Floo
       const dz = node.end[1] - node.start[1]
       const lineLength = Math.hypot(dx, dz)
       if (lineLength > 1e-6) {
-        const frame = isCurvedWall(node) ? getWallCurveFrameAt(node, 0.5) : null
+        const frame =
+          isSplineFence(node) || isCurvedWall(node) ? getFenceCenterlineFrameAt(node, 0.5) : null
         const midX = frame ? frame.point.x : (node.start[0] + node.end[0]) / 2
         const midZ = frame ? frame.point.y : (node.start[1] + node.end[1]) / 2
         const nx = frame ? frame.normal.x : -dz / lineLength
@@ -393,32 +572,39 @@ export function buildFenceFloorplan(node: FenceNode, ctx: GeometryContext): Floo
     // Curve sagitta handle — teal dot at the visual midpoint that drives
     // `curveOffset`. Routes through `fenceCurveAffordance`. Fences host
     // no children, so there's no equivalent of wall's curve-blocking
-    // check to gate this.
-    const curveHandle = getWallMidpointHandlePoint(node)
-    children.push({
-      kind: 'endpoint-handle',
-      point: [curveHandle.x, curveHandle.y],
-      state: 'idle',
-      variant: 'curve',
-      affordance: 'curve',
-      payload: { fenceId: node.id },
-    })
+    // check to gate this. Suppressed for spline fences: the single sagitta
+    // is meaningless against a multi-point curve.
+    if (!isSplineFence(node)) {
+      const curveHandle = getWallMidpointHandlePoint(node)
+      children.push({
+        kind: 'endpoint-handle',
+        point: [curveHandle.x, curveHandle.y],
+        state: 'idle',
+        variant: 'curve',
+        affordance: 'curve',
+        payload: { fenceId: node.id },
+      })
+    }
 
-    const length = getWallCurveLength(node)
+    const length = getFloorplanFenceLength(node)
     if (length >= 0.1) {
-      const midX = (node.start[0] + node.end[0]) / 2
-      const midZ = (node.start[1] + node.end[1]) / 2
-      const dx = node.end[0] - node.start[0]
-      const dz = node.end[1] - node.start[1]
+      const labelFrame =
+        isSplineFence(node) || isCurvedWall(node) ? getFenceCenterlineFrameAt(node, 0.5) : null
+      const midX = labelFrame ? labelFrame.point.x : (node.start[0] + node.end[0]) / 2
+      const midZ = labelFrame ? labelFrame.point.y : (node.start[1] + node.end[1]) / 2
+      const angle = labelFrame
+        ? Math.atan2(labelFrame.tangent.y, labelFrame.tangent.x)
+        : Math.atan2(node.end[1] - node.start[1], node.end[0] - node.start[0])
       children.push({
         kind: 'dimension-label',
         cx: midX,
         cy: midZ,
         text: `${Number.parseFloat(length.toFixed(2))}m`,
-        angle: Math.atan2(dz, dx),
+        angle,
       })
     }
   }
 
+  for (const feature of drafts) children.push(buildFenceFeatureSymbol(feature, node, ctx, false))
   return { kind: 'group', children }
 }

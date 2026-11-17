@@ -21,6 +21,8 @@ import {
   type RoofSegmentNode,
   type RoofSegmentSurfaceMaterialRole,
   type RoofSurfaceMaterialRole,
+  type SceneMaterial,
+  type SceneMaterialId,
   type ShelfNode,
   type SlabNode,
   type StairNode,
@@ -39,6 +41,7 @@ export type PaintableMaterialTarget =
       | 'slab'
       | 'ceiling'
       | 'shelf'
+      | 'cabinet'
       | 'chimney'
       | 'dormer'
       | 'box-vent'
@@ -46,6 +49,8 @@ export type PaintableMaterialTarget =
       | 'turbine-vent'
       | 'cupola'
       | 'eyebrow-vent'
+      | 'gutter'
+      | 'downspout'
     >
   | 'item'
 
@@ -240,6 +245,7 @@ export function getEffectiveChimneyMaterial(
 }
 
 export function resolveActivePaintMaterialFromSelection(params: {
+  materials?: Record<SceneMaterialId, SceneMaterial>
   nodes: Record<string, any>
   selectedId: string | null
   selectedMaterialTarget: {
@@ -271,9 +277,10 @@ export function resolveActivePaintMaterialFromSelection(params: {
       node: selectedNode,
       role: selectedMaterialTarget.role as string,
       nodes,
+      materials: params.materials,
     })
     if (surface) {
-      const sourceTarget = selectedNode.type as PaintableMaterialTarget
+      const sourceTarget = (paintCap.materialTarget ?? selectedNode.type) as PaintableMaterialTarget
       return hasActivePaintMaterial({
         material: surface.material,
         materialPreset: surface.materialPreset,
@@ -302,7 +309,7 @@ export function resolveActivePaintMaterialFromSelection(params: {
     ) {
       const roofNode = selectedNode as RoofNode
       const fallbackSegment = (roofNode.children ?? [])
-        .map((id: AnyNodeId) => nodes[id as AnyNodeId] as RoofSegmentNode | undefined)
+        .map((id) => nodes[id as AnyNodeId] as RoofSegmentNode | undefined)
         .find(
           (segment: RoofSegmentNode | undefined) =>
             segment?.type === 'roof-segment' &&
@@ -351,6 +358,10 @@ export function resolveActivePaintMaterialFromSelection(params: {
   // Wall / chimney / dormer flow through the registry-driven path
   // at the top of this function.
 
+  // Slot-backed kinds resolve via the registry-driven `getEffectiveMaterial`
+  // path at the top of this function, including legacy inline-material
+  // fallbacks when their capability exposes one.
+
   if (
     (selectedNode.type === 'fence' ||
       selectedNode.type === 'column' ||
@@ -385,6 +396,10 @@ export function resolvePaintTargetFromSelection(params: {
 
   const selectedNode = nodes[selectedId]
   if (!selectedNode) return null
+
+  const registryPaintTarget = nodeRegistry.get(selectedNode.type)?.capabilities?.paint
+    ?.materialTarget
+  if (registryPaintTarget) return registryPaintTarget as PaintableMaterialTarget
 
   if (selectedNode.type === 'wall') {
     return 'wall'

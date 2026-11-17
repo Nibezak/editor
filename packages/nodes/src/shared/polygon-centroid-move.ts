@@ -9,7 +9,12 @@ import {
   useLiveTransforms,
   useScene,
 } from '@pascal-app/core'
-import { getSegmentGridStep, useAlignmentGuides, type WallPlanPoint } from '@pascal-app/editor'
+import {
+  getSegmentGridStep,
+  isMagneticSnapActive,
+  useAlignmentGuides,
+  type WallPlanPoint,
+} from '@pascal-app/editor'
 import type * as THREE from 'three'
 import { createFloorplanCursorResolver } from './floorplan-cursor'
 
@@ -110,7 +115,7 @@ export function createPolygonCentroidMoveTarget(args: {
           candidates,
           threshold: ALIGNMENT_THRESHOLD_M,
         })
-        if (result.snap) {
+        if (result.snap && isMagneticSnapActive()) {
           dx += result.snap.dx
           dz += result.snap.dz
         }
@@ -149,7 +154,10 @@ export function createPolygonCentroidMoveTarget(args: {
       if (extraCommitData) {
         Object.assign(data, extraCommitData)
       }
-      useScene.getState().updateNodes([{ id, data }])
+      // Dragging the shape by hand is the sanctioned conversion of a derived
+      // slab or ceiling into an authored one; for every other kind this is an
+      // ordinary polygon update carrying `extraCommitData`.
+      useScene.getState().detachDerivedNode(id, data as Partial<AnyNode>)
       useScene.getState().markDirty(id)
       useLiveTransforms.getState().clear(id)
       return true

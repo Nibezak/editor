@@ -25,7 +25,9 @@ import {
 } from 'three'
 import { LineBasicNodeMaterial, MeshBasicNodeMaterial } from 'three/webgpu'
 import { EDITOR_LAYER } from '../../lib/constants'
+import { holeEditScope } from '../../lib/interaction/scope'
 import useEditor from '../../store/use-editor'
+import useInteractionScope, { useEditingHole } from '../../store/use-interaction-scope'
 import { suppressBoxSelectForPointer } from '../tools/select/box-select-state'
 import { swallowNextClick } from './handles/use-handle-drag'
 
@@ -137,12 +139,12 @@ function makeHitGeometry(hole: HolePolygon, centerY: number, height: number): Bu
 
 function getSurfaceY(slab: SlabNode): number {
   const elevation = slab.elevation ?? 0.05
-  return (elevation > 0 ? elevation : 0) + SURFACE_OFFSET
+  return Math.max(elevation, 0) + SURFACE_OFFSET
 }
 
 function getHitCenterY(slab: SlabNode): number {
   const elevation = slab.elevation ?? 0.05
-  const surfaceTop = elevation > 0 ? elevation : 0
+  const surfaceTop = Math.max(elevation, 0)
   // Keep the hit box's TOP at the slab surface (never poke above it) so the
   // slab's centre thickness/height handle, which sits on top, always wins the
   // raycast over the hole's selectable area.
@@ -239,7 +241,9 @@ export function SlabHoleHighlights() {
     }
   }, [hoveredHole, selectedIds, setHoveredHole])
 
-  if (selectedIds.length === 0) return null
+  // Sole selection only — hole outlines are click-to-edit chrome, and a
+  // multi-selection shows highlight only (the group transforms as one piece).
+  if (selectedIds.length !== 1) return null
 
   return (
     <>
@@ -254,7 +258,7 @@ function SelectedSlabHoleHighlights({ slabId }: { slabId: string }) {
   const node = useScene((state) => state.nodes[slabId as AnyNodeId])
   const override = useLiveNodeOverrides((state) => state.overrides.get(slabId))
   const hoveredHole = useEditor((state) => state.hoveredHole)
-  const editingHole = useEditor((state) => state.editingHole)
+  const editingHole = useEditingHole()
   const setHoveredHole = useEditor((state) => state.setHoveredHole)
 
   const slab = node?.type === 'slab' ? (node as SlabNode) : null
@@ -389,27 +393,34 @@ function SlabHoleHighlight({
       // user edits the source rather than the synced hole. Everything else —
       // manual holes and holes that predate holeMetadata — opens the editor.
       if (metadata?.source === 'stair' && metadata.stairId) {
-        useEditor.getState().setEditingHole(null)
+        useInteractionScope
+          .getState()
+          .endIf((sc) => sc.kind === 'reshaping' && sc.reshape === 'hole')
         useEditor.getState().setHoveredHole(null)
         resetPointerCursor()
         selectOwnedNode(metadata.stairId, 'stair')
         return
       }
       if (metadata?.source === 'elevator' && metadata.elevatorId) {
-        useEditor.getState().setEditingHole(null)
+        useInteractionScope
+          .getState()
+          .endIf((sc) => sc.kind === 'reshaping' && sc.reshape === 'hole')
         useEditor.getState().setHoveredHole(null)
         resetPointerCursor()
         selectOwnedNode(metadata.elevatorId, 'elevator')
         return
       }
 
-      useEditor.getState().setEditingHole({ nodeId: slabId, holeIndex })
+      useInteractionScope.getState().begin(holeEditScope({ nodeId: slabId, holeIndex }))
       useViewer.getState().setSelection({ selectedIds: [slabId as AnyNodeId] })
     },
     [holeIndex, metadata, slabId],
   )
 
+  // Only a release that ends a press on a hole is the hole's: any other
+  // (a handle drag let go over the hole) must reach its owner.
   const handlePointerUp = useCallback((event: ThreeEvent<PointerEvent>) => {
+    if (!restoreNodeClickSuppression) return
     releaseNodeClickSuppression()
     stopPointerPropagation(event)
   }, [])

@@ -1,15 +1,5 @@
-import type { Point2D } from '@pascal-app/core'
-import type { FloorplanLineSegment, FloorplanSelectionBounds } from './types'
-
-export function clampPlanValue(value: number, min: number, max: number) {
-  return Math.min(Math.max(value, min), max)
-}
-
-export function rotatePlanVector(x: number, y: number, rotation: number): [number, number] {
-  const cos = Math.cos(rotation)
-  const sin = Math.sin(rotation)
-  return [x * cos + y * sin, -x * sin + y * cos]
-}
+import { clampPlanValue, type Point2D, rotatePlanVector } from '@pascal-app/core'
+import type { FloorplanSelectionBounds } from './types'
 
 export function getRotatedRectanglePolygon(
   center: Point2D,
@@ -33,47 +23,6 @@ export function getRotatedRectanglePolygon(
       y: center.y + offsetY,
     }
   })
-}
-
-export function interpolatePlanPoint(start: Point2D, end: Point2D, t: number): Point2D {
-  return {
-    x: start.x + (end.x - start.x) * t,
-    y: start.y + (end.y - start.y) * t,
-  }
-}
-
-export function getPlanPointDistance(start: Point2D, end: Point2D): number {
-  return Math.hypot(end.x - start.x, end.y - start.y)
-}
-
-export function movePlanPointTowards(start: Point2D, end: Point2D, distance: number): Point2D {
-  const totalDistance = getPlanPointDistance(start, end)
-  if (totalDistance <= Number.EPSILON || distance <= 0) {
-    return start
-  }
-
-  return interpolatePlanPoint(start, end, Math.min(1, distance / totalDistance))
-}
-
-export function getThickPlanLinePolygon(line: FloorplanLineSegment, thickness: number): Point2D[] {
-  const dx = line.end.x - line.start.x
-  const dy = line.end.y - line.start.y
-  const length = Math.hypot(dx, dy)
-
-  if (length <= Number.EPSILON || thickness <= 0) {
-    return [line.start, line.end, line.end, line.start]
-  }
-
-  const halfThickness = thickness / 2
-  const normalX = (-dy / length) * halfThickness
-  const normalY = (dx / length) * halfThickness
-
-  return [
-    { x: line.start.x + normalX, y: line.start.y + normalY },
-    { x: line.end.x + normalX, y: line.end.y + normalY },
-    { x: line.end.x - normalX, y: line.end.y - normalY },
-    { x: line.start.x - normalX, y: line.start.y - normalY },
-  ]
 }
 
 export function getFloorplanSelectionBounds(

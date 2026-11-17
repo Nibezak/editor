@@ -2,7 +2,7 @@
 
 import { type BuildingNode, sceneRegistry, useScene } from '@pascal-app/core'
 import { useViewer } from '@pascal-app/viewer'
-import { Html } from '@react-three/drei'
+import { LocalizedHtml as Html } from '@pascal-app/viewer/ui'
 import { useFrame } from '@react-three/fiber'
 import { useCallback, useRef } from 'react'
 import * as THREE from 'three'
@@ -38,7 +38,7 @@ export function FloatingBuildingActionMenu() {
       // Read lazily at click time — no need to subscribe to nodes for a
       // one-shot action.
       const node = useScene.getState().nodes[buildingId]
-      if (!node || node.type !== 'building') return
+      if (node?.type !== 'building') return
       sfxEmitter.emit('sfx:item-pick')
       setMovingNode(node as BuildingNode)
       setSelection({ buildingId: null })

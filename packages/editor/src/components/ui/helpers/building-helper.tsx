@@ -1,32 +1,24 @@
-import { ShortcutToken } from '../primitives/shortcut-token'
+import { usePascalI18n } from '@pascal-app/core'
+import type { HudTitle } from '../../../lib/hud-title'
+import { ContextualHelperPanel } from './contextual-helper-panel'
 
 interface BuildingHelperProps {
   showRotate?: boolean
+  title?: HudTitle | null
 }
 
-export function BuildingHelper({ showRotate }: BuildingHelperProps) {
+// Rotate is one hint with both keys (R / T) — never two separate
+// counterclockwise / clockwise rows — to match every other placement helper.
+export function BuildingHelper({ showRotate, title = null }: BuildingHelperProps) {
+  const i18n = usePascalI18n()
   return (
-    <div className="pointer-events-none fixed top-1/2 right-4 z-40 flex -translate-y-1/2 flex-col gap-2 rounded-lg border border-border bg-background/95 px-4 py-3 shadow-lg backdrop-blur-md">
-      <div className="flex items-center gap-2 text-sm">
-        <ShortcutToken value="Left click" />
-        <span className="text-muted-foreground">Place building</span>
-      </div>
-      {showRotate && (
-        <>
-          <div className="flex items-center gap-2 text-sm">
-            <ShortcutToken value="R" />
-            <span className="text-muted-foreground">Rotate counterclockwise</span>
-          </div>
-          <div className="flex items-center gap-2 text-sm">
-            <ShortcutToken value="T" />
-            <span className="text-muted-foreground">Rotate clockwise</span>
-          </div>
-        </>
-      )}
-      <div className="flex items-center gap-2 text-sm">
-        <ShortcutToken value="Esc" />
-        <span className="text-muted-foreground">Cancel</span>
-      </div>
-    </div>
+    <ContextualHelperPanel
+      title={title}
+      hints={[
+        { keys: ['Left click'], label: i18n._({ id: 'editor.helpers.buildingHelper.placeBuilding', message: 'Place building' }) },
+        ...(showRotate ? [{ keys: ['R', 'T'], label: i18n._({ id: 'editor.helpers.buildingHelper.rotate', message: 'Rotate' }) }] : []),
+        { keys: ['Esc'], label: i18n._({ id: 'editor.helpers.buildingHelper.cancel', message: 'Cancel' }) },
+      ]}
+    />
   )
 }

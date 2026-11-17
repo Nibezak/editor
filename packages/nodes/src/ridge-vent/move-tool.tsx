@@ -12,7 +12,9 @@ import {
 } from '@pascal-app/core'
 import {
   consumePlacementDragRelease,
+  isGridSnapActive,
   markToolCancelConsumed,
+  stripPlacementMetadataFlags,
   triggerSFX,
   useEditor,
 } from '@pascal-app/editor'
@@ -23,7 +25,8 @@ import {
   roofSegmentLocalToBuildingLocal,
   snapRelativeRoofDragTarget,
 } from '../shared/relative-roof-drag'
-import { getSurfaceY } from '../shared/roof-surface'
+import { resolveRidgeSnap } from '../shared/ridge-snap'
+import { getRoofTopSurfaceY } from '../shared/roof-surface'
 import {
   clearRoofSurfacePlacementGuides,
   publishRoofSurfaceNodePlacementGuides,
@@ -32,7 +35,8 @@ import RidgeVentPreview from './preview'
 
 type RidgeVentDragTarget = Pick<RelativeRoofDragTarget, 'segment' | 'localX'> & {
   localY: number
-  localZ: 0
+  localZ: number
+  rotation: number
 }
 
 /**
@@ -84,12 +88,16 @@ export default function MoveRidgeVentTool({ node }: { node: RidgeVentNode }) {
     const resolveTarget = (event: RoofEvent): RidgeVentDragTarget | null => {
       const rawTarget = roofDrag.resolve(event)
       if (!rawTarget) return null
-      const target = snapRelativeRoofDragTarget(rawTarget, event.nativeEvent?.shiftKey === true)
+      const target = snapRelativeRoofDragTarget(rawTarget, event.nativeEvent?.altKey === true)
+      const snap = resolveRidgeSnap(target.segment, target.localX, target.localZ)
+      if (!snap) return null
+      const yOffset = original.position[1] ?? 0
       return {
         segment: target.segment,
-        localX: target.localX,
-        localY: getSurfaceY(target.localX, 0, target.segment),
-        localZ: 0,
+        localX: snap.localX,
+        localY: getRoofTopSurfaceY(snap.localX, snap.localZ, target.segment) + yOffset,
+        localZ: snap.localZ,
+        rotation: snap.rotation,
       }
     }
 
@@ -104,14 +112,15 @@ export default function MoveRidgeVentTool({ node }: { node: RidgeVentNode }) {
       const sx = Math.round(target.localX * 20) / 20
       const sz = Math.round(target.localZ * 20) / 20
       if (
-        event.nativeEvent?.shiftKey !== true &&
+        isGridSnapActive() &&
+        event.nativeEvent?.altKey !== true &&
         (!lastSnap || lastSnap[0] !== sx || lastSnap[1] !== sz)
       ) {
         triggerSFX('sfx:grid-snap')
         lastSnap = [sx, sz]
       }
 
-      setPreviewYaw((event.node.rotation ?? 0) + (target.segment.rotation ?? 0))
+      setPreviewYaw((event.node.rotation ?? 0) + (target.segment.rotation ?? 0) + target.rotation)
       setPreviewPos(
         roofSegmentLocalToBuildingLocal(target.segment.id, [
           target.localX,
@@ -158,10 +167,10 @@ export default function MoveRidgeVentTool({ node }: { node: RidgeVentNode }) {
       st.updateNode(node.id as AnyNodeId, {
         roofSegmentId: targetSegmentId,
         parentId: targetSegmentId,
-        position: [target.localX, target.localY, target.localZ],
-        rotation: original.rotation,
+        position: [target.localX, original.position[1] ?? 0, target.localZ],
+        rotation: target.rotation,
         visible: true,
-        metadata: {},
+        metadata: stripPlacementMetadataFlags(original.metadata),
       })
       useScene.temporal.getState().pause()
 

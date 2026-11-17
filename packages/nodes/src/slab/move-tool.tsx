@@ -18,10 +18,12 @@ import {
   CursorSphere,
   consumePlacementDragRelease,
   getSegmentGridStep,
+  isAlignmentGuideActive,
+  isMagneticSnapActive,
   markToolCancelConsumed,
+  projectAlignmentGuidesWorldToActiveBuildingLocal,
   resolveAlignmentForActiveBuilding,
   snapBuildingLocalToWorldGrid,
-  snapFenceDraftPoint,
   triggerSFX,
   useAlignmentGuides,
   useEditor,
@@ -29,6 +31,7 @@ import {
 import { useViewer } from '@pascal-app/viewer'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type * as THREE from 'three'
+import { snapFenceDraftPoint } from '../fence/drafting'
 
 /**
  * Phase 5 Stage D — slab whole-move tool.
@@ -168,17 +171,15 @@ export const MoveSlabTool: React.FC<{ node: SlabNode }> = ({ node }) => {
     const onGridMove = (event: GridEvent) => {
       if (isFloorplanSourcedEvent(event)) return
       const gridStep = getSegmentGridStep()
-      const bypassSnap = event.nativeEvent?.shiftKey === true
       const [localX, localZ] = snapFenceDraftPoint({
         point: [event.localPosition[0], event.localPosition[2]],
         walls: levelWalls,
         fences: levelFences,
-        bypassSnap,
-        gridSnap: (p) => snapBuildingLocalToWorldGrid(p, gridStep),
+        magnetic: isMagneticSnapActive(),
+        gridSnap: (p: [number, number]) => snapBuildingLocalToWorldGrid(p, gridStep),
       })
 
       if (
-        !bypassSnap &&
         previousGridPosRef.current &&
         (localX !== previousGridPosRef.current[0] || localZ !== previousGridPosRef.current[1])
       ) {
@@ -193,20 +194,22 @@ export const MoveSlabTool: React.FC<{ node: SlabNode }> = ({ node }) => {
       let deltaZ = localZ - anchor[1]
 
       // Figma-style alignment snap: align the slab's translated polygon
-      // vertices to other objects' anchors; fold the snap into the delta and
-      // publish a guide. Alt bypasses alignment; Shift bypasses all snap.
-      const bypass = event.nativeEvent?.altKey === true || bypassSnap
-      if (!bypass && alignmentCandidates.length > 0) {
+      // vertices to other objects' anchors and publish a guide. Guides are
+      // DISPLAYED in every snapping mode (isAlignmentGuideActive); the magnetic
+      // pull into the delta applies only in 'lines' mode (isMagneticSnapActive).
+      if (isAlignmentGuideActive() && alignmentCandidates.length > 0) {
         const result = resolveAlignmentForActiveBuilding({
           moving: polygonAnchors(slabId, translatePolygon(originalPolygon, deltaX, deltaZ)),
           candidates: alignmentCandidates,
           threshold: ALIGNMENT_THRESHOLD_M,
         })
-        if (result.snap) {
+        if (result.snap && isMagneticSnapActive()) {
           deltaX += result.snap.dx
           deltaZ += result.snap.dz
         }
-        useAlignmentGuides.getState().set(result.guides)
+        useAlignmentGuides
+          .getState()
+          .set(projectAlignmentGuidesWorldToActiveBuildingLocal(result.guides))
       } else {
         useAlignmentGuides.getState().clear()
       }
@@ -229,7 +232,8 @@ export const MoveSlabTool: React.FC<{ node: SlabNode }> = ({ node }) => {
         // Single scene.update — recorded as one undo step (history was
         // never paused). GeometrySystem rebuilds polygon-driven geometry
         // and resets the group's transform on the next frame.
-        useScene.getState().updateNode(slabId, {
+        // Dragging a plate by hand converts it to an authored slab.
+        useScene.getState().detachDerivedNode(slabId, {
           polygon: translatePolygon(originalPolygon, deltaX, deltaZ),
           holes: originalHoles.map((h) => translatePolygon(h, deltaX, deltaZ)),
         })
@@ -270,10 +274,10 @@ export const MoveSlabTool: React.FC<{ node: SlabNode }> = ({ node }) => {
 
     return () => {
       useAlignmentGuides.getState().clear()
-      if (!wasCommitted) {
-        clearPreview()
-      } else {
+      if (wasCommitted) {
         useLiveTransforms.getState().clear(slabId)
+      } else {
+        clearPreview()
       }
       emitter.off('grid:move', onGridMove)
       emitter.off('grid:click', onGridClick)

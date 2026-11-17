@@ -11,8 +11,12 @@ import {
   useScene,
 } from '@pascal-app/core'
 import {
+  copyCollectionIds,
   DragBoundingBox,
   EDITOR_LAYER,
+  isAlignmentGuideActive,
+  isGridSnapActive,
+  isMagneticSnapActive,
   markToolCancelConsumed,
   stripPlacementMetadataFlags,
   triggerSFX,
@@ -139,14 +143,14 @@ export const MoveLiquidLineTool: React.FC<{ node: AnyNode }> = ({ node }) => {
     }
 
     const onMove = (event: GridEvent) => {
-      const bypass = event.nativeEvent?.shiftKey === true
-      const snap = bypass ? (v: number) => v : snapToGridStep
+      const snap = isGridSnapActive() ? snapToGridStep : (v: number) => v
       let dx = snap(event.localPosition[0] - centerX)
       let dz = snap(event.localPosition[2] - centerZ)
 
-      // Figma-style alignment: snap the run's footprint box edges onto nearby
-      // geometry and publish the guides (Shift bypass).
-      if (!bypass) {
+      // Figma-style magnetic alignment: snap the run's footprint box edges onto
+      // nearby geometry and publish the guides. Grid follows the snapping mode;
+      // lines follow magnetic alignment — the two are independent.
+      if (isAlignmentGuideActive()) {
         const proposed: Aabb2D = {
           minX: baseAabb.minX + dx,
           maxX: baseAabb.maxX + dx,
@@ -154,8 +158,10 @@ export const MoveLiquidLineTool: React.FC<{ node: AnyNode }> = ({ node }) => {
           maxZ: baseAabb.maxZ + dz,
         }
         const { dx: sdx, dz: sdz, guides } = resolveGhostAlignment(nodeId, proposed, candidates)
-        dx += sdx
-        dz += sdz
+        if (isMagneticSnapActive()) {
+          dx += sdx
+          dz += sdz
+        }
         useAlignmentGuides.getState().set(guides)
       } else {
         useAlignmentGuides.getState().clear()
@@ -163,7 +169,7 @@ export const MoveLiquidLineTool: React.FC<{ node: AnyNode }> = ({ node }) => {
 
       const cur: [number, number] = [centerX + dx, centerZ + dz]
       if (
-        !bypass &&
+        (isGridSnapActive() || isMagneticSnapActive()) &&
         (!prevSnapRef.current ||
           prevSnapRef.current[0] !== cur[0] ||
           prevSnapRef.current[1] !== cur[1])
@@ -197,7 +203,13 @@ export const MoveLiquidLineTool: React.FC<{ node: AnyNode }> = ({ node }) => {
           metadata: stripPlacementMetadataFlags(node.metadata),
           visible: true,
         })
-        useScene.getState().createNode(created as AnyNode, node.parentId as AnyNodeId)
+        useScene.getState().createNodes([
+          {
+            node: created as AnyNode,
+            parentId: node.parentId as AnyNodeId,
+            collectionIds: copyCollectionIds(node),
+          },
+        ])
         selectId = created.id as AnyNodeId
       } else {
         useScene.getState().updateNode(nodeId, { path: finalPath } as Partial<AnyNode>)

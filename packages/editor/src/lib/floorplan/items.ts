@@ -2,11 +2,14 @@ import {
   type AnyNode,
   type AnyNodeId,
   getScaledDimensions,
+  getWallBodyCenterOffset,
+  getWallLocalFaceZ,
   type ItemNode,
   type LevelNode,
+  rotatePlanVector,
   useLiveTransforms,
 } from '@pascal-app/core'
-import { getRotatedRectanglePolygon, rotatePlanVector } from './geometry'
+import { getRotatedRectanglePolygon } from './geometry'
 import type { FloorplanItemEntry, FloorplanNodeTransform, LevelDescendantMap } from './types'
 
 export function collectLevelDescendants(
@@ -82,8 +85,9 @@ export function getItemFloorplanTransform(
       )
       const wallLocalZ =
         item.asset.attachTo === 'wall-side'
-          ? ((parentNode.thickness ?? 0.1) / 2) * (item.side === 'back' ? -1 : 1)
-          : item.position[2]
+          ? getWallLocalFaceZ(parentNode, item.side === 'front' ? 'a' : 'b')
+          : item.position[2] +
+            (item.asset.attachTo === 'wall' ? getWallBodyCenterOffset(parentNode) : 0)
       const [offsetX, offsetY] = rotatePlanVector(item.position[0], wallLocalZ, wallRotation)
 
       result = {
@@ -164,7 +168,10 @@ type Point = {
 
 function getItemDimensionPolygon(item: ItemNode, transform: FloorplanNodeTransform): Point[] {
   const [width, , depth] = getScaledDimensions(item)
-  const centerLocalZ = item.asset.attachTo === 'wall-side' ? -depth / 2 : 0
+  // Wall-side items extend depth-ward away from the wall (into the room); push
+  // the footprint centre a half-depth out along local +Z. A negative offset
+  // would lay the box across the wall onto the far side (mirrored from 3D).
+  const centerLocalZ = item.asset.attachTo === 'wall-side' ? depth / 2 : 0
   const [offsetX, offsetY] = rotatePlanVector(0, centerLocalZ, transform.rotation)
 
   return getRotatedRectanglePolygon(

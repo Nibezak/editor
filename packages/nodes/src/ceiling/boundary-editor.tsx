@@ -1,12 +1,20 @@
 'use client'
 
-import { type CeilingNode, resolveLevelId, useLiveNodeOverrides, useScene } from '@pascal-app/core'
 import {
+  type CeilingNode,
+  resolveCeilingHeight,
+  resolveLevelId,
+  useLiveNodeOverrides,
+  useScene,
+} from '@pascal-app/core'
+import {
+  boundaryReshapeScope,
   clearCeilingSnapFeedback,
   PolygonEditor,
   type PolygonEditorPlanPointSnapContext,
   resolveCeilingPlanPointSnap,
   triggerSFX,
+  useInteractionScope,
 } from '@pascal-app/editor'
 import { useViewer } from '@pascal-app/viewer'
 import { useCallback, useEffect, useMemo, useRef } from 'react'
@@ -26,7 +34,7 @@ export const CeilingBoundaryEditor: React.FC<{ ceilingId: CeilingNode['id'] }> =
   ceilingId,
 }) => {
   const ceilingNode = useScene((s) => s.nodes[ceilingId])
-  const updateNode = useScene((s) => s.updateNode)
+  const detachDerivedNode = useScene((s) => s.detachDerivedNode)
   const markDirty = useScene((s) => s.markDirty)
   const setSelection = useViewer((s) => s.setSelection)
   const setHoveredId = useViewer((s) => s.setHoveredId)
@@ -49,10 +57,12 @@ export const CeilingBoundaryEditor: React.FC<{ ceilingId: CeilingNode['id'] }> =
   const handlePolygonChange = useCallback(
     (newPolygon: Array<[number, number]>) => {
       clearCeilingSnapFeedback()
-      updateNode(ceilingId, { polygon: newPolygon })
+      // Reshaping the boundary is the sanctioned conversion of a derived
+      // ceiling into an authored one — the reconciler stops owning it here.
+      detachDerivedNode(ceilingId, { polygon: newPolygon })
       setSelection({ selectedIds: [ceilingId] })
     },
-    [ceilingId, updateNode, setSelection],
+    [ceilingId, detachDerivedNode, setSelection],
   )
 
   const handlePolygonPreview = useCallback(
@@ -95,13 +105,19 @@ export const CeilingBoundaryEditor: React.FC<{ ceilingId: CeilingNode['id'] }> =
 
   const handleDragStateChange = useCallback(
     (isDragging: boolean) => {
-      if (!isDragging) {
+      // A vertex/edge drag is a `boundary` reshape — drive the snapping HUD
+      // (no-angle 'polygon' set) and keep the idle select hints off-screen.
+      const scope = useInteractionScope.getState()
+      if (isDragging) {
+        scope.begin(boundaryReshapeScope(ceilingId))
+      } else {
+        scope.endIf((s) => s.kind === 'reshaping' && s.reshape === 'boundary')
         ownsPolygonPreviewRef.current = false
         clearCeilingSnapFeedback()
       }
       setCeilingHandleHover(isDragging)
     },
-    [setCeilingHandleHover],
+    [ceilingId, setCeilingHandleHover],
   )
 
   const handlePolygonEditorDragCommit = useCallback(() => {
@@ -125,8 +141,6 @@ export const CeilingBoundaryEditor: React.FC<{ ceilingId: CeilingNode['id'] }> =
         fallbackPoint: context.gridPoint,
         levelId: ceilingLevelId,
         excludeId: ceilingId,
-        altKey: context.nativeEvent?.altKey === true,
-        shiftKey: context.nativeEvent?.shiftKey === true,
       }).point,
     [ceilingId, ceilingLevelId],
   )
@@ -136,6 +150,9 @@ export const CeilingBoundaryEditor: React.FC<{ ceilingId: CeilingNode['id'] }> =
       clearCeilingSnapFeedback()
       useLiveNodeOverrides.getState().clear(ceilingId)
       useScene.getState().markDirty(ceilingId)
+      useInteractionScope
+        .getState()
+        .endIf((s) => s.kind === 'reshaping' && s.reshape === 'boundary')
       ownsPolygonPreviewRef.current = false
       if (ownsCeilingHoverRef.current && useViewer.getState().hoveredId === ceilingId) {
         useViewer.getState().setHoveredId(null)
@@ -164,7 +181,7 @@ export const CeilingBoundaryEditor: React.FC<{ ceilingId: CeilingNode['id'] }> =
       onVertexHoverChange={handleHandleHoverChange}
       polygon={effectiveCeiling.polygon}
       resolvePlanPoint={resolvePolygonEditorPlanPoint}
-      surfaceHeight={effectiveCeiling.height ?? 2.5}
+      surfaceHeight={resolveCeilingHeight(effectiveCeiling, useScene.getState().nodes)}
     />
   )
 }

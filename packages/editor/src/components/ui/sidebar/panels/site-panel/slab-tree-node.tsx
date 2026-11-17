@@ -1,11 +1,13 @@
-import { type AnyNodeId, type SlabNode, useScene } from '@pascal-app/core'
+import { type AnyNodeId, type SlabNode, usePascalI18n, useScene } from '@pascal-app/core'
 import { useViewer } from '@pascal-app/viewer'
 import Image from 'next/image'
 import { memo, useCallback, useState } from 'react'
-import useEditor from './../../../../../store/use-editor'
+import { formatAreaLabel } from '@pascal-app/core'
 import { InlineRenameInput } from './inline-rename-input'
 import { focusTreeNode, handleTreeSelection, TreeNodeWrapper } from './tree-node'
 import { TreeNodeActions } from './tree-node-actions'
+import { localizedFloorFootprintName } from '../../../../../i18n/floor-footprint-name'
+import { slabDefaultName } from './default-names'
 
 interface SlabTreeNodeProps {
   nodeId: AnyNodeId
@@ -18,6 +20,7 @@ export const SlabTreeNode = memo(function SlabTreeNode({
   depth,
   isLast,
 }: SlabTreeNodeProps) {
+  const i18n = usePascalI18n()
   const [isEditing, setIsEditing] = useState(false)
   const isVisible = useScene((s) => s.nodes[nodeId]?.visible !== false)
   const polygon = useScene((s) => (s.nodes[nodeId] as SlabNode | undefined)?.polygon ?? [])
@@ -25,19 +28,25 @@ export const SlabTreeNode = memo(function SlabTreeNode({
   const isHovered = useViewer((state) => state.hoveredId === nodeId)
   const setSelection = useViewer((state) => state.setSelection)
   const setHoveredId = useViewer((state) => state.setHoveredId)
+  const unit = useViewer((state) => state.unit)
+  // A base plate is one footprint's "Floor & foundation": listed by the
+  // footprint's name ("Shared floor", "Lanai floor"), opening that panel.
+  const footprint = useScene((s) => {
+    const node = s.nodes[nodeId]
+    return node?.type === 'slab' && node.plateRole === 'base'
+      ? localizedFloorFootprintName(s.nodes, node, i18n)
+      : null
+  })
 
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation()
-      const handled = handleTreeSelection(
+      handleTreeSelection(
         e,
         nodeId,
         useViewer.getState().selection.selectedIds,
         setSelection,
       )
-      if (!handled && useEditor.getState().phase === 'furnish') {
-        useEditor.getState().setPhase('structure')
-      }
     },
     [nodeId, setSelection],
   )
@@ -45,8 +54,7 @@ export const SlabTreeNode = memo(function SlabTreeNode({
   const handleStartEditing = useCallback(() => setIsEditing(true), [])
   const handleStopEditing = useCallback(() => setIsEditing(false), [])
 
-  const area = calculatePolygonArea(polygon).toFixed(1)
-  const defaultName = `Slab (${area}m²)`
+  const defaultName = slabDefaultName(i18n, formatAreaLabel(calculatePolygonArea(polygon), unit))
 
   return (
     <TreeNodeWrapper
@@ -62,13 +70,19 @@ export const SlabTreeNode = memo(function SlabTreeNode({
       isSelected={isSelected}
       isVisible={isVisible}
       label={
-        <InlineRenameInput
-          defaultName={defaultName}
-          isEditing={isEditing}
-          nodeId={nodeId}
-          onStartEditing={handleStartEditing}
-          onStopEditing={handleStopEditing}
-        />
+        footprint ? (
+          <span className="truncate" data-footprint-entry={nodeId}>
+            {footprint}
+          </span>
+        ) : (
+          <InlineRenameInput
+            defaultName={defaultName}
+            isEditing={isEditing}
+            nodeId={nodeId}
+            onStartEditing={handleStartEditing}
+            onStopEditing={handleStopEditing}
+          />
+        )
       }
       nodeId={nodeId}
       onClick={handleClick}

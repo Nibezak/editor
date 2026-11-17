@@ -5,17 +5,27 @@ import {
   CursorSphere,
   DimensionPill,
   EDITOR_LAYER,
+  isAngleSnapActive,
+  isGridSnapActive,
+  isMagneticSnapActive,
+  isTypingTarget,
   markToolCancelConsumed,
   triggerSFX,
   useEditor,
+  usePathDraftPreview,
 } from '@pascal-app/editor'
+import {
+  alignDrawPoint,
+  clearDrawAlignment,
+  collectScenePorts,
+  findNearestPortXZ,
+} from '@pascal-app/editor/distribution'
 import { useViewer } from '@pascal-app/viewer'
 import { Html } from '@react-three/drei'
 import { useEffect, useRef, useState } from 'react'
 import { type Group, Vector3 } from 'three'
-import { alignDrawPoint, clearDrawAlignment } from '../shared/draw-alignment'
 import { LevelOffsetGroup } from '../shared/level-offset-group'
-import { collectScenePorts, findNearestPortXZ, REFRIGERANT_PORT_SYSTEMS } from '../shared/ports'
+import { REFRIGERANT_PORT_SYSTEMS } from '../shared/port-systems'
 import { linesetDefinition } from './definition'
 
 /**
@@ -28,10 +38,12 @@ import { linesetDefinition } from './definition'
  *     snaps onto the port so a run mates flush.
  *   - **Second click** commits a two-point lineset and keeps its far end
  *     anchored, so the next click continues the run like wall / duct drafting.
- *   - The in-flight end is angle-locked to the nearest 45° step in XZ from
- *     the start; Y stays at the start's height. Hold **Shift** to release.
+ *   - The in-flight end follows the active snapping mode: `angles` locks it to
+ *     the nearest 45° step in XZ from the start (Y stays at the start's
+ *     height); `grid`/`lines`/`off` leave it free. Shift cycles the mode.
  *   - Hold **Alt** → vertical mode. XZ locks to the start; vertical mouse
- *     motion drives Y. Click commits the riser segment.
+ *     motion drives Y. Click commits the riser segment. (Drafting has no
+ *     validity gate, so Alt is the riser modifier here, not force-place.)
  *   - Esc clears an anchored start point.
  *
  * Snapping is restricted to refrigerant ports, so a lineset never grabs a
@@ -94,6 +106,11 @@ const LinesetTool = () => {
   const lastClientYRef = useRef<number | null>(null)
 
   useEffect(() => {
+    usePathDraftPreview.getState().setDraft('lineset', draftPoints, cursorPos)
+  }, [cursorPos, draftPoints])
+  useEffect(() => () => usePathDraftPreview.getState().clear('lineset'), [])
+
+  useEffect(() => {
     if (!activeLevelId) return
 
     const commitSegment = (start: [number, number, number], end: [number, number, number]) => {
@@ -109,6 +126,7 @@ const LinesetTool = () => {
       // mitered polyline run.
       const lineset = LinesetNode.parse({
         ...linesetDefinition.defaults(),
+        ...useEditor.getState().toolDefaults.lineset,
         name: 'Lineset',
         path: [start, end],
       })
@@ -123,14 +141,17 @@ const LinesetTool = () => {
     const resolveSnappedPoint = (
       event: GridEvent,
     ): { point: [number, number, number]; snapped: [number, number, number] | null } => {
+      // Port mating is the run's primary affordance; it stays on in every
+      // snapping mode except `off` (the raw-cursor bypass).
+      const snapEnabled = isGridSnapActive() || isMagneticSnapActive() || isAngleSnapActive()
       const last = draftRef.current.at(-1)
       if (!last) {
         const raw: [number, number, number] = [event.localPosition[0], 0, event.localPosition[2]]
-        if (event.nativeEvent?.altKey !== true) {
+        if (event.nativeEvent?.altKey !== true && snapEnabled) {
           const target = findNearbyPort(raw)
           if (target) return { point: target, snapped: target }
         }
-        const step = useEditor.getState().gridSnapStep
+        const step = isGridSnapActive() ? useEditor.getState().gridSnapStep : 0
         return { point: [snap(raw[0], step), 0, snap(raw[2], step)], snapped: null }
       }
       const rawXZ: [number, number, number] = [
@@ -138,13 +159,14 @@ const LinesetTool = () => {
         last[1],
         event.localPosition[2],
       ]
-      const shift = event.nativeEvent?.shiftKey === true
-      const angled = shift ? rawXZ : projectToAngleLock(last, rawXZ)
-      if (event.nativeEvent?.altKey !== true && !shift) {
+      // The 45° lock is now the `angles` snapping mode (Shift cycles to it),
+      // not a held key.
+      const angled = isAngleSnapActive() ? projectToAngleLock(last, rawXZ) : rawXZ
+      if (event.nativeEvent?.altKey !== true && snapEnabled) {
         const target = findNearbyPort(rawXZ)
         if (target) return { point: target, snapped: target }
       }
-      const step = useEditor.getState().gridSnapStep
+      const step = isGridSnapActive() ? useEditor.getState().gridSnapStep : 0
       return { point: [snap(angled[0], step), angled[1], snap(angled[2], step)], snapped: null }
     }
 
@@ -152,7 +174,7 @@ const LinesetTool = () => {
       const anchor = altAnchorRef.current
       const last = draftRef.current.at(-1)
       if (!anchor || !last) return null
-      const step = useEditor.getState().gridSnapStep
+      const step = isGridSnapActive() ? useEditor.getState().gridSnapStep : 0
       const dy = (anchor.clientY - clientY) / ALT_PIXELS_PER_METER
       const snappedDy = snap(dy, step)
       const y = Math.min(ALT_Y_MAX_M, Math.max(ALT_Y_MIN_M, anchor.baseY + snappedDy))
@@ -161,16 +183,16 @@ const LinesetTool = () => {
 
     // Resolve the cursor point (port / grid / angle snap) then layer
     // Figma-style alignment so a lineset lines up with other runs, equipment,
-    // and items as it's drawn. Free point (first vertex / Shift) snaps; an
-    // angle-locked continuation shows the guide passively. Port snap or Alt
-    // bypasses alignment.
+    // and items as it's drawn. A free point (first vertex, or no angle lock)
+    // snaps; an angle-locked continuation shows the guide passively so it
+    // doesn't fight the angle ray. Alignment follows the `lines` mode; a port
+    // snap or Alt-vertical bypasses it.
     const resolveAlignedPoint = (event: GridEvent) => {
       const r = resolveSnappedPoint(event)
       const hasStart = draftRef.current.length > 0
-      const shift = event.nativeEvent?.shiftKey === true
       const alt = event.nativeEvent?.altKey === true
       const point = alignDrawPoint(r.point, {
-        applySnap: !hasStart || shift,
+        applySnap: isMagneticSnapActive() && (!hasStart || !isAngleSnapActive()),
         bypass: alt || r.snapped !== null,
       })
       return { ...r, point }
@@ -230,8 +252,7 @@ const LinesetTool = () => {
     }
 
     const onKeyDown = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement | null)?.tagName
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return
+      if (isTypingTarget(e.target)) return
       if (e.key === 'Alt') {
         e.preventDefault()
         enterAltMode()
@@ -312,7 +333,7 @@ const LinesetTool = () => {
             <group position={cursorPos}>
               <Html
                 center
-                position={[0, 0.35, 0]}
+                position={[0, 1.45, 0]}
                 style={{ pointerEvents: 'none', userSelect: 'none' }}
                 zIndexRange={[100, 0]}
               >

@@ -1,15 +1,28 @@
 import {
   type AnyNodeId,
+  type CornerSnap,
+  evaluateCorner,
   type FloorplanMoveTarget,
   type FloorplanMoveTargetSession,
+  runAsSingleSceneHistoryStep,
+  useLiveNodeOverrides,
   useLiveTransforms,
   useScene,
   type WallNode,
   WallNode as WallNodeSchema,
   type WindowNode,
 } from '@pascal-app/core'
-import { snapToHalf, triggerSFX, usePlacementPreview } from '@pascal-app/editor'
+import {
+  isGridSnapActive,
+  isMagneticSnapActive,
+  snapToHalf,
+  triggerSFX,
+  useEditor,
+  usePlacementPreview,
+} from '@pascal-app/editor'
 import { createFloorplanCursorResolver } from '../shared/floorplan-cursor'
+import { movedOpeningCasingFaces } from '../shared/opening-casing-move'
+import { openingPlaneOffsetOnWall } from '../shared/opening-plane-offset'
 import { getOpeningHostLevelId, getRoofHostedOpeningPlanPoint } from '../shared/roof-opening-host'
 import {
   findClosestWallInPlan,
@@ -17,6 +30,8 @@ import {
   resolveOpeningPlacement,
   snapLocalXToNeighbors,
 } from '../shared/wall-attach-target'
+import { showCornerCue, snappingTurnedOff } from './corner-cue'
+import { settleMovedWindow } from './corner-fuse'
 import { clampToWall, DEFAULT_WINDOW_SILL_M, hasWallChildOverlap } from './window-math'
 
 /**
@@ -32,6 +47,7 @@ import { clampToWall, DEFAULT_WINDOW_SILL_M, hasWallChildOverlap } from './windo
  */
 
 export const windowFloorplanMoveTarget: FloorplanMoveTarget<WindowNode> = ({ node }) => {
+  const nodeId = node.id as AnyNodeId
   // The level that owns the wall-snap candidates — resolves the wall-hosted,
   // roof-hosted, and fresh-placement parentings (see `getOpeningHostLevelId`).
   const startLevelId = getOpeningHostLevelId(node, useScene.getState().nodes)
@@ -70,6 +86,9 @@ export const windowFloorplanMoveTarget: FloorplanMoveTarget<WindowNode> = ({ nod
     wallId: string
     roofSegmentId: undefined
     roofFace: undefined
+    visible: true
+    casingFaceA?: boolean
+    casingFaceB?: boolean
   } | null = null
 
   // R flips the window's facing (front ↔ back) mid-placement — see
@@ -83,18 +102,33 @@ export const windowFloorplanMoveTarget: FloorplanMoveTarget<WindowNode> = ({ nod
   // See `doorFloorplanMoveTarget`: off-wall the window free-follows the cursor
   // as a ghost and isn't committable (it needs a wall). Starts true.
   let onWall = true
-  // Shift force-place (last apply's modifier) — lets `canCommit` allow an
+  let lastFits = true
+  // Alt force-place (last apply's modifier) — lets `canCommit` allow an
   // overlapping placement, matching the 3D move.
   let forcePlace = false
+  // Near a corner, as in the 3D move: the edge snaps to it, the window waiting on the other wall
+  // is outlined, and the drop joins them. Alt drops it plain.
+  let cornerSnap: CornerSnap | null = null
+  let liveTransformActive = useLiveTransforms.getState().transforms.has(nodeId)
+  let liveOverrideKey: string | null = null
+  let placementPreviewActive = usePlacementPreview.getState().node?.id === nodeId
+
+  const setLiveOverride = (key: string, values: Record<string, unknown>) => {
+    if (liveOverrideKey === key) return
+    liveOverrideKey = key
+    useLiveNodeOverrides.getState().set(nodeId, values)
+  }
 
   // Move SFX — parity with the 3D `MoveWindowTool` (see `doorFloorplanMoveTarget`):
-  // ONE soft `sfx:grid-snap` click per grid step, identical free-following or on a
-  // wall, keyed on the RAW cursor. No separate floor→wall cue (that was the
-  // "double"). 2D `apply` runs once per pointermove, so the step-key dedup suffices.
-  const STEP_M = 0.1
+  // ONE soft `sfx:grid-snap` click each time the window's PLACED position crosses
+  // a step. Keyed on the SNAPPED value, quantized by the live grid step in grid
+  // mode else a gentle fixed cadence — grid mode ticks once per cell, lines/off
+  // tick as the window moves.
+  const FREE_STEP_M = 0.1
   let lastStepKey: string | null = null
   const tickGridStep = (...coords: number[]) => {
-    const key = coords.map((c) => Math.round(c / STEP_M)).join(',')
+    const step = isGridSnapActive() ? useEditor.getState().gridSnapStep : FREE_STEP_M
+    const key = coords.map((c) => Math.round(c / step)).join(',')
     if (key !== lastStepKey) {
       lastStepKey = key
       triggerSFX('sfx:grid-snap')
@@ -104,9 +138,13 @@ export const windowFloorplanMoveTarget: FloorplanMoveTarget<WindowNode> = ({ nod
   const freeFollow = (planPoint: readonly [number, number]) => {
     onWall = false
     lastValid = null
-    if ((useScene.getState().nodes[node.id as AnyNodeId] as WindowNode | undefined)?.visible) {
-      useScene.getState().updateNode(node.id as AnyNodeId, { visible: false })
+    cornerSnap = null
+    showCornerCue(null)
+    if (liveTransformActive) {
+      useLiveTransforms.getState().clear(nodeId)
+      liveTransformActive = false
     }
+    setLiveOverride('free-follow', { visible: false })
     const half = node.width / 2 + 0.5
     const wall = WallNodeSchema.parse({
       start: [planPoint[0] - half, planPoint[1]],
@@ -132,26 +170,18 @@ export const windowFloorplanMoveTarget: FloorplanMoveTarget<WindowNode> = ({ nod
       visible: true,
     } as WindowNode
     usePlacementPreview.getState().set(ghost, wall)
+    placementPreviewActive = true
   }
 
   const session: FloorplanMoveTargetSession = {
-    affectedIds: [node.id as AnyNodeId],
+    affectedIds: [nodeId],
     flipSide() {
       flipped = !flipped
       if (lastApply) this.apply(lastApply)
     },
     apply({ planPoint, modifiers }) {
       lastApply = { planPoint, modifiers }
-      forcePlace = modifiers.shiftKey === true
-      // Drop any stale live transform left by the 3D `MoveWindowTool` — see
-      // `doorFloorplanMoveTarget.apply`. Without this the 2D registry layer
-      // keeps rendering the window at the 3D tool's last hover (it prefers
-      // `useLiveTransforms` over the scene node for door/window), so the 2D
-      // slide — which writes the scene node — wouldn't show. Guarded on
-      // existence: `clear` allocates a new Map + re-renders.
-      if (useLiveTransforms.getState().transforms.has(node.id as AnyNodeId)) {
-        useLiveTransforms.getState().clear(node.id as AnyNodeId)
-      }
+      forcePlace = modifiers.altKey === true
       const nodes = useScene.getState().nodes
       const resolvedPlanPoint = resolveCursor(planPoint)
       const hit = findClosestWallInPlan(resolvedPlanPoint, nodes, startLevelId)
@@ -162,37 +192,66 @@ export const windowFloorplanMoveTarget: FloorplanMoveTarget<WindowNode> = ({ nod
         return
       }
       onWall = true
-      usePlacementPreview.getState().clear()
-      if ((nodes[node.id as AnyNodeId] as WindowNode | undefined)?.visible === false) {
-        useScene.getState().updateNode(node.id as AnyNodeId, { visible: true })
+      if (placementPreviewActive) {
+        usePlacementPreview.getState().clear()
+        placementPreviewActive = false
       }
 
       // Figma-style along-wall alignment first (edge-to-edge with other
-      // openings / wall ends), winning over the 0.5m grid snap; falls back
-      // to grid when nothing aligns. Alt bypasses alignment; Shift bypasses all snap.
-      const neighborX =
-        modifiers.altKey || modifiers.shiftKey
-          ? null
-          : snapLocalXToNeighbors({
-              wall: hit.wall,
-              localX: hit.localX,
+      // openings / wall ends), winning over the grid snap; falls back to grid
+      // when nothing aligns. Follows the magnetic ("lines") mode; the grid
+      // component lives in `snapToHalf` (mode-aware → raw when grid is off).
+      const neighborX = !isMagneticSnapActive()
+        ? null
+        : snapLocalXToNeighbors({
+            wall: hit.wall,
+            localX: hit.localX,
+            width: node.width,
+            selfId: nodeId,
+            nodes,
+          })
+      const snappedLocalX = neighborX ?? snapToHalf(hit.localX)
+      const slid = clampToWall(hit.wall, snappedLocalX, startLocalY, node.width, node.height, nodes)
+      const { clampedY } = slid
+      let clampedX = slid.clampedX
+      lastFits = slid.fits
+      // Alt, or snapping off, drops the window where it is.
+      const corner =
+        forcePlace || snappingTurnedOff()
+          ? { snap: null, block: null }
+          : evaluateCorner(nodes, {
+              wallId: hit.wall.id,
+              centreX: clampedX,
               width: node.width,
-              selfId: node.id as AnyNodeId,
-              nodes,
+              height: node.height,
+              sillHeight: clampedY - node.height / 2,
+              ignoreId: nodeId,
+              held: cornerSnap?.end ?? null,
             })
-      const snappedLocalX = neighborX ?? (modifiers.shiftKey ? hit.localX : snapToHalf(hit.localX))
-      const { clampedX, clampedY } = clampToWall(
-        hit.wall,
-        snappedLocalX,
-        startLocalY,
-        node.width,
-        node.height,
-      )
+      cornerSnap = corner.snap
+      // A curtain wall's margin can keep the window off its corner: then it is no corner.
+      if (cornerSnap) {
+        const settled = clampToWall(
+          hit.wall,
+          cornerSnap.centreX,
+          clampedY,
+          node.width,
+          node.height,
+          nodes,
+        )
+        if (Math.abs(settled.clampedX - cornerSnap.centreX) > 1e-6) {
+          corner.block = { reason: 'curtain', end: cornerSnap.end }
+          cornerSnap = null
+        } else {
+          clampedX = cornerSnap.centreX
+          lastFits = settled.fits
+        }
+      }
+      showCornerCue(cornerSnap, corner.block)
 
-      // One click per grid step, keyed on the RAW along-wall cursor (`hit.localX`)
-      // so the wall slide ticks at the same cadence as the off-wall ghost — same
-      // SFX, no separate snap cue.
-      tickGridStep(hit.localX)
+      // One click per real position step, keyed on the SNAPPED along-wall value
+      // so it ticks only when the window actually moves to a new cell.
+      tickGridStep(clampedX)
 
       const side: WindowNode['side'] = flipped
         ? hit.side === 'front'
@@ -200,9 +259,12 @@ export const windowFloorplanMoveTarget: FloorplanMoveTarget<WindowNode> = ({ nod
           : 'front'
         : hit.side
       const itemRotation = hit.itemRotation + (flipped ? Math.PI : 0)
+      // Another wall may be drawn the other way round: the casing keeps to its side.
+      const casing = movedOpeningCasingFaces(node, hit.wall.id, [0, itemRotation, 0], nodes)
 
       lastValid = {
-        position: [clampedX, clampedY, 0],
+        // Same-wall moves keep the wall-local plane offset; another host resets it.
+        position: [clampedX, clampedY, openingPlaneOffsetOnWall(node, hit.wall.id)],
         rotation: [0, itemRotation, 0],
         side,
         parentId: hit.wall.id,
@@ -211,31 +273,43 @@ export const windowFloorplanMoveTarget: FloorplanMoveTarget<WindowNode> = ({ nod
         // overlay's snapshot restores it if the move is reverted.
         roofSegmentId: undefined,
         roofFace: undefined,
+        visible: true,
+        ...casing,
       }
 
-      useScene.getState().updateNodes([
-        {
-          id: node.id as AnyNodeId,
-          data: lastValid,
-        },
-      ])
+      setLiveOverride(`wall:${hit.wall.id}:${side}`, {
+        parentId: hit.wall.id,
+        wallId: hit.wall.id,
+        side,
+        roofSegmentId: undefined,
+        roofFace: undefined,
+        visible: true,
+        ...casing,
+      })
+      useLiveTransforms.getState().set(nodeId, {
+        position: lastValid.position,
+        rotation: itemRotation,
+      })
+      liveTransformActive = true
     },
     canCommit() {
+      showCornerCue(null)
       // Off-wall the window is free-following — not placeable; the overlay
       // reverts to the pre-move snapshot. Matches the 3D move.
-      if (!onWall) return false
-      const live = useScene.getState().nodes[node.id as AnyNodeId] as WindowNode | undefined
-      if (!live || live.type !== 'window') return false
-      // Block on overlap UNLESS Shift force-places — same `placeable` rule as
-      // the 3D move + the shared `resolveOpeningPlacement`.
-      const collides = hasWallChildOverlap(
-        live.parentId as string,
-        live.position[0],
-        live.position[1],
-        live.width,
-        live.height,
-        live.id,
-      )
+      if (!onWall || !lastValid) return false
+      const live = useScene.getState().nodes[nodeId] as WindowNode | undefined
+      if (live?.type !== 'window') return false
+      const collides =
+        !lastFits ||
+        hasWallChildOverlap(
+          lastValid.parentId,
+          useScene.getState().nodes,
+          lastValid.position[0],
+          lastValid.position[1],
+          live.width,
+          live.height,
+          live.id,
+        )
       return resolveOpeningPlacement({ collides, forcePlace }).placeable
     },
     commit() {
@@ -247,12 +321,12 @@ export const windowFloorplanMoveTarget: FloorplanMoveTarget<WindowNode> = ({ nod
       // committed move lands on the same `parentId` with identical data.
       // See `doorFloorplanMoveTarget.commit` for the original fix.
       if (!lastValid) return
-      useScene.getState().updateNodes([
-        {
-          id: node.id as AnyNodeId,
-          data: lastValid,
-        },
-      ])
+      const placed = lastValid
+      // At a corner the window lands already joined, as one undo step.
+      runAsSingleSceneHistoryStep(useScene, () => {
+        useScene.getState().updateNodes([{ id: nodeId, data: placed }])
+        settleMovedWindow(nodeId, cornerSnap)
+      })
     },
   }
 

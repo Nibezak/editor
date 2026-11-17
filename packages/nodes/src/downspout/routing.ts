@@ -5,6 +5,7 @@ import type {
   RoofSegmentNode,
   SceneApi,
 } from '@pascal-app/core'
+import { getRoofShapeEaveOverhang } from '@pascal-app/core'
 import { EAVE_TUCK_INWARD } from '../gutter/eave-snap'
 import { resolveGutterOutletById } from '../gutter/outlet-lookup'
 import {
@@ -49,13 +50,13 @@ export type DownspoutRouting = {
  */
 export function computeDownspoutRouting(
   gutter: GutterNode,
-  segment: Pick<RoofSegmentNode, 'overhang'>,
+  segment: Pick<RoofSegmentNode, 'overhang'> & Partial<Pick<RoofSegmentNode, 'roofType'>>,
   outletId: string | undefined,
 ): DownspoutRouting | null {
   const outlet = resolveGutterOutletById(gutter, outletId)
   if (!outlet) return null
 
-  const overhang = segment.overhang ?? 0
+  const overhang = getRoofShapeEaveOverhang(segment)
   const floorMidZ = profileFloorMidZ(gutter.profile ?? 'k-style', Math.max(0.04, gutter.size))
   // The gutter rim is tucked `EAVE_TUCK_INWARD` back from the very tip
   // of the overhang, so the real outboard distance is `overhang − tuck`
@@ -80,7 +81,7 @@ export function resolveDownspoutRouting(
 ): DownspoutRouting | null {
   if (!node.gutterId) return null
   const gutter = sceneApi.get<GutterNode>(node.gutterId as AnyNodeId)
-  if (!gutter || gutter.type !== 'gutter') return null
+  if (gutter?.type !== 'gutter') return null
   const segment = gutter.roofSegmentId
     ? sceneApi.get<RoofSegmentNode>(gutter.roofSegmentId as AnyNodeId)
     : undefined

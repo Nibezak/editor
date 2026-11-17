@@ -1,6 +1,9 @@
 import {
   type AnyNodeId,
+  getRoofSegmentDeckReach,
   getRoofSegmentSurfaceY,
+  glazedRoofSupportsPoint,
+  isGlazedRoofSegment,
   type RoofNode,
   type RoofSegmentNode,
   sceneRegistry,
@@ -9,6 +12,7 @@ import {
 import * as THREE from 'three'
 
 const worldPoint = new THREE.Vector3()
+const localPoint = new THREE.Vector3()
 
 export type RoofSegmentHit = {
   segment: RoofSegmentNode
@@ -59,13 +63,14 @@ export function resolveRoofSegmentHit(
     const segObj = sceneRegistry.nodes.get(seg.id)
     if (!segObj) continue
     segObj.updateWorldMatrix(true, false)
-    const local = segObj.worldToLocal(worldPoint.clone())
+    const local = segObj.worldToLocal(localPoint.copy(worldPoint))
 
-    if (!firstSegment) firstSegment = { seg, segObj }
+    if (!firstSegment && !isGlazedRoofSegment(seg)) firstSegment = { seg, segObj }
 
-    const overhang = seg.overhang ?? 0
-    const halfW = seg.width / 2 + overhang
-    const halfD = seg.depth / 2 + overhang
+    const reach = getRoofSegmentDeckReach(seg)
+    const halfW = seg.width / 2 + reach.x
+    const halfD = seg.depth / 2 + reach.z
+    if (isGlazedRoofSegment(seg) && !glazedRoofSupportsPoint(seg, local.x, local.z)) continue
     if (Math.abs(local.x) <= halfW && Math.abs(local.z) <= halfD) {
       const surfaceY = getRoofSegmentSurfaceY(seg, local.x, local.z)
       const score = Math.abs(local.y - surfaceY)
@@ -81,7 +86,7 @@ export function resolveRoofSegmentHit(
   if (best) return best.hit
 
   if (firstSegment) {
-    const local = firstSegment.segObj.worldToLocal(worldPoint.clone())
+    const local = firstSegment.segObj.worldToLocal(localPoint.copy(worldPoint))
     return {
       segment: firstSegment.seg,
       localX: local.x,

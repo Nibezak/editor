@@ -3,28 +3,29 @@
 import {
   emitter,
   type FenceNode,
+  formatAngleRadians,
   type GridEvent,
   getWallCurveLength,
+  usePascalI18n,
   useScene,
   type WallNode,
 } from '@pascal-app/core'
 import {
   CursorSphere,
-  type FencePlanPoint,
-  formatAngleRadians,
   getAngleToSegmentReference,
   getSegmentAngleReferenceAtPoint,
+  isTypingTarget,
   MeasurementPill,
-  type MovingFenceEndpoint,
   triggerSFX,
   useAlignmentGuides,
   useDragAction,
-  useEditor,
+  useInteractionScope,
 } from '@pascal-app/editor'
 import { useViewer } from '@pascal-app/viewer'
 import { Html } from '@react-three/drei'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { moveFenceEndpointDragAction } from './actions/move-endpoint'
+import type { FencePlanPoint } from './drafting'
 
 /**
  * Phase 5 Stage D — thin React wrapper around `moveFenceEndpointDragAction`.
@@ -40,10 +41,14 @@ import { moveFenceEndpointDragAction } from './actions/move-endpoint'
  *  - Angle label between this segment and any neighbour segment sharing
  *    the dragged endpoint — same legacy treatment.
  *
- *  Mounted by the legacy ToolManager via the `move-endpoint` affordance
- *  key. `target.fence` + `target.endpoint` come from the editor store
- *  (`useEditor.movingFenceEndpoint`).
+ *  Mounted by ToolManager via the `move-endpoint` affordance key. ToolManager
+ *  reconstructs this `target` from the reshaped node + the scope's endpoint.
  */
+export type MovingFenceEndpoint = {
+  fence: FenceNode
+  endpoint: 'start' | 'end'
+}
+
 type SegmentLike = {
   id: string
   start: FencePlanPoint
@@ -91,6 +96,7 @@ function pickAngleLabel(args: {
 }
 
 export const MoveFenceEndpointTool: React.FC<{ target: MovingFenceEndpoint }> = ({ target }) => {
+  const i18n = usePascalI18n()
   const fenceId = target.fence.id
   const endpoint = target.endpoint
   const initialPoint: FencePlanPoint =
@@ -104,7 +110,9 @@ export const MoveFenceEndpointTool: React.FC<{ target: MovingFenceEndpoint }> = 
   const exitMoveMode = (committed: boolean) => {
     if (committed) triggerSFX('sfx:item-place')
     useViewer.getState().setSelection({ selectedIds: [fenceId] })
-    useEditor.getState().setMovingFenceEndpoint(null)
+    useInteractionScope
+      .getState()
+      .endIf((scope) => scope.kind === 'reshaping' && scope.reshape === 'endpoint')
   }
 
   useDragAction({
@@ -212,7 +220,7 @@ export const MoveFenceEndpointTool: React.FC<{ target: MovingFenceEndpoint }> = 
   // event modifiers so the badge can toggle without a pointer move.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return
+      if (isTypingTarget(e.target)) return
       if (e.key === 'Alt') setAltPressed(true)
     }
     const onKeyUp = (e: KeyboardEvent) => {
@@ -268,11 +276,19 @@ export const MoveFenceEndpointTool: React.FC<{ target: MovingFenceEndpoint }> = 
           <div
             className={`whitespace-nowrap rounded-full border px-2 py-1 font-medium text-[11px] shadow-lg backdrop-blur-md transition-colors ${
               altPressed
-                ? 'border-amber-500/70 bg-amber-500/15 text-amber-100'
+                ? 'border-amber-500/70 bg-amber-50/95 text-amber-800 dark:bg-amber-500/15 dark:text-amber-100'
                 : 'border-border/70 bg-background/90 text-foreground/80'
             }`}
           >
-            {altPressed ? 'Detach endpoint' : 'Drag endpoint'}
+            {altPressed
+              ? i18n._({
+                  id: 'node.fence.moveEndpointTool.detachEndpoint',
+                  message: 'Detach endpoint',
+                })
+              : i18n._({
+                  id: 'node.fence.moveEndpointTool.dragEndpoint',
+                  message: 'Drag endpoint',
+                })}
           </div>
         </div>
       </Html>

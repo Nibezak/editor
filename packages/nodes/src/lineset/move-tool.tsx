@@ -11,8 +11,12 @@ import {
   useScene,
 } from '@pascal-app/core'
 import {
+  copyCollectionIds,
   DragBoundingBox,
   EDITOR_LAYER,
+  isAlignmentGuideActive,
+  isGridSnapActive,
+  isMagneticSnapActive,
   markToolCancelConsumed,
   stripPlacementMetadataFlags,
   triggerSFX,
@@ -150,14 +154,14 @@ export const MoveLinesetTool: React.FC<{ node: AnyNode }> = ({ node }) => {
     }
 
     const onMove = (event: GridEvent) => {
-      const bypass = event.nativeEvent?.shiftKey === true
-      const snap = bypass ? (v: number) => v : snapToGridStep
+      const snap = isGridSnapActive() ? snapToGridStep : (v: number) => v
       let dx = snap(event.localPosition[0] - centerX)
       let dz = snap(event.localPosition[2] - centerZ)
 
-      // Figma-style alignment: snap the run's footprint box edges onto
-      // nearby geometry and publish the guides (Shift bypass).
-      if (!bypass) {
+      // Figma-style magnetic alignment: snap the run's footprint box edges onto
+      // nearby geometry and publish the guides. Grid follows the snapping mode;
+      // lines follow magnetic alignment — the two are independent.
+      if (isAlignmentGuideActive()) {
         const proposed: Aabb2D = {
           minX: baseAabb.minX + dx,
           maxX: baseAabb.maxX + dx,
@@ -165,8 +169,10 @@ export const MoveLinesetTool: React.FC<{ node: AnyNode }> = ({ node }) => {
           maxZ: baseAabb.maxZ + dz,
         }
         const { dx: sdx, dz: sdz, guides } = resolveGhostAlignment(nodeId, proposed, candidates)
-        dx += sdx
-        dz += sdz
+        if (isMagneticSnapActive()) {
+          dx += sdx
+          dz += sdz
+        }
         useAlignmentGuides.getState().set(guides)
       } else {
         useAlignmentGuides.getState().clear()
@@ -174,7 +180,7 @@ export const MoveLinesetTool: React.FC<{ node: AnyNode }> = ({ node }) => {
 
       const cur: [number, number] = [centerX + dx, centerZ + dz]
       if (
-        !bypass &&
+        (isGridSnapActive() || isMagneticSnapActive()) &&
         (!prevSnapRef.current ||
           prevSnapRef.current[0] !== cur[0] ||
           prevSnapRef.current[1] !== cur[1])
@@ -182,10 +188,11 @@ export const MoveLinesetTool: React.FC<{ node: AnyNode }> = ({ node }) => {
         triggerSFX('sfx:grid-snap')
       }
       prevSnapRef.current = cur
-      hasMovedRef.current = true
       const nextPath = originalPath.map(([x, y, z]) => [x + dx, y, z + dz] as Vec3)
+      // Connected joints that cannot follow hold the last shown frame.
+      if (connectivity && !connectivity.preview({ path: nextPath })) return
+      hasMovedRef.current = true
       setPreview(nextPath)
-      connectivity?.preview({ path: nextPath })
     }
 
     const commit = (event: GridEvent) => {
@@ -198,24 +205,36 @@ export const MoveLinesetTool: React.FC<{ node: AnyNode }> = ({ node }) => {
         event.nativeEvent?.stopPropagation?.()
         return
       }
-      committed = true
       const finalPath = previewPathRef.current
+      const creating = isNew && !useScene.getState().nodes[nodeId]
+      // Fold connected-fitting / sibling-run follow-updates into the SAME
+      // batch as the moved run so the whole joint is one undo step.
+      const followUpdates =
+        creating || !connectivity ? [] : connectivity.commitUpdates({ path: finalPath })
+      if (!followUpdates) {
+        event.nativeEvent?.stopPropagation?.()
+        return
+      }
+      committed = true
 
       useScene.temporal.getState().resume()
       let selectId = nodeId
-      if (isNew && !useScene.getState().nodes[nodeId]) {
+      if (creating) {
         const created = LinesetNode.parse({
           ...(node as Record<string, unknown>),
           path: finalPath,
           metadata: stripPlacementMetadataFlags(node.metadata),
           visible: true,
         })
-        useScene.getState().createNode(created as AnyNode, node.parentId as AnyNodeId)
+        useScene.getState().createNodes([
+          {
+            node: created as AnyNode,
+            parentId: node.parentId as AnyNodeId,
+            collectionIds: copyCollectionIds(node),
+          },
+        ])
         selectId = created.id as AnyNodeId
       } else {
-        // Fold connected-fitting / sibling-run follow-updates into the SAME
-        // batch as the moved run so the whole joint is one undo step.
-        const followUpdates = connectivity?.commitUpdates({ path: finalPath }) ?? []
         useScene
           .getState()
           .updateNodes([
